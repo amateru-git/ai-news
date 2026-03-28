@@ -2,11 +2,11 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { demoNews } from '../data/demoNews';
 
 const RSS_SOURCES = [
-  { id: 'itmedia', name: 'ITMEDIA', url: 'https://rss.itmedia.co.jp/rss/2.0/aitplus.xml', count: 8 },
-  { id: 'impress', name: 'IMPRESS', url: 'https://www.watch.impress.co.jp/data/rss/1.0/ipw/feed.rdf', count: 8 },
-  { id: 'techcrunch_jp', name: 'TECHCRUNCH JP', url: 'https://jp.techcrunch.com/feed/', count: 8 },
-  { id: 'ascii', name: 'ASCII.JP', url: 'https://ascii.jp/rss.xml', count: 8 },
-  { id: 'cnet_jp', name: 'CNET JAPAN', url: 'https://japan.cnet.com/rss/index.rdf', count: 8 },
+  { id: 'cnet_jp', name: 'CNET Japan', url: 'https://japan.cnet.com/rss/index.rdf' },
+  { id: 'ascii', name: 'ASCII.jp', url: 'https://ascii.jp/rss.xml' },
+  { id: 'impress', name: 'Impress', url: 'https://www.watch.impress.co.jp/data/rss/1.0/ipw/feed.rdf' },
+  { id: 'techcrunch', name: 'TechCrunch', url: 'https://techcrunch.com/category/artificial-intelligence/feed/' },
+  { id: 'venturebeat', name: 'VentureBeat', url: 'https://venturebeat.com/feed/' },
 ];
 
 const RSS2JSON_BASE = 'https://api.rss2json.com/v1/api.json';
@@ -29,12 +29,33 @@ function formatDateJST(pubDateStr) {
   }
 }
 
+// Detect if text is likely English (simple heuristic)
+function isEnglish(text) {
+  if (!text) return false;
+  // Count ASCII letters vs total chars
+  const ascii = (text.match(/[a-zA-Z]/g) || []).length;
+  return ascii / text.length > 0.5;
+}
+
+// Translate batch of texts via our serverless function
+async function translateToJapanese(texts) {
+  try {
+    const response = await fetch('/api/translate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ texts }),
+    });
+    if (!response.ok) return null;
+    const data = await response.json();
+    return data.translations || null;
+  } catch {
+    return null;
+  }
+}
+
 async function fetchSource(source) {
-  const params = new URLSearchParams({
-    rss_url: source.url,
-    count: String(source.count || 8),
-  });
-  const res = await fetch(`${RSS2JSON_BASE}?${params}`);
+  const apiUrl = `${RSS2JSON_BASE}?rss_url=${encodeURIComponent(source.url)}`;
+  const res = await fetch(apiUrl);
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   const data = await res.json();
   if (data.status !== 'ok') throw new Error('RSS feed error');
@@ -71,6 +92,32 @@ export function useNews() {
       if (fetched.length > 0) {
         // Sort by pubDate descending
         fetched.sort((a, b) => new Date(b.pubDate) - new Date(a.pubDate));
+
+        // Translate English titles and descriptions
+        const textsToTranslate = [];
+        const translationMap = []; // { i, field }
+
+        fetched.forEach((item, i) => {
+          if (isEnglish(item.title)) {
+            translationMap.push({ i, field: 'title' });
+            textsToTranslate.push(item.title);
+          }
+          if (isEnglish(item.description)) {
+            translationMap.push({ i, field: 'description' });
+            textsToTranslate.push(item.description);
+          }
+        });
+
+        if (textsToTranslate.length > 0) {
+          const translated = await translateToJapanese(textsToTranslate);
+          if (translated) {
+            translated.forEach((text, ti) => {
+              const { i, field } = translationMap[ti];
+              fetched[i] = { ...fetched[i], [field]: text };
+            });
+          }
+        }
+
         setItems(fetched);
       }
       // If all fail, keep existing items (demo data or previous fetch)
